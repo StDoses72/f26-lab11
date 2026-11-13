@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BOOKING_CONFIRMED } from '../src/bus/events';
+import { BOOKING_CONFIRMED, REFUND_REQUESTED } from '../src/bus/events';
 import {
   CANCELLATION_TEMPLATE,
   CONFIRMATION_TEMPLATE,
@@ -99,6 +99,65 @@ describe('the refund ledger', () => {
     expect(app.ledger.totalRefundedCents()).toBe(8500);
     expect(app.gateway.settledFor(booking.id)).toHaveLength(1);
     expect(app.gateway.totalSettledCents()).toBe(8500);
+  });
+
+  it('records and pays each refund once despite repeated deliveries', () => {
+    const app = newApp();
+    const bookings = [
+      aBookingWithRefund(app),
+      app.service.book(aRequest({ start: 13 * 60, end: 15 * 60 })),
+    ];
+    for (const booking of bookings) {
+      app.service.cancel(booking.id);
+    }
+    const refunds = app.bus.messagesOfType(REFUND_REQUESTED);
+
+    for (let round = 0; round < 2; round += 1) {
+      for (const refund of refunds) {
+        app.bus.redeliver(refund.id);
+      }
+    }
+
+    for (const booking of bookings) {
+      expect(app.ledger.forBooking(booking.id)).toHaveLength(1);
+      expect(app.gateway.settledFor(booking.id)).toHaveLength(1);
+    }
+    const owed = bookings[0].priceCents + bookings[1].priceCents;
+    expect(app.ledger.totalRefundedCents()).toBe(owed);
+    expect(app.gateway.totalSettledCents()).toBe(owed);
+    expect(app.gateway.callCount()).toBe(2);
+    expect(app.bus.messagesOfType(REFUND_REQUESTED)).toHaveLength(2);
+    for (const refund of refunds) {
+      expect(app.bus.deliveryCount(refund.id)).toBe(3);
+    }
+    expect(app.bus.deadLetters()).toHaveLength(0);
+  });
+
+  it('can retry an unpaid refund after the provider fails without duplicating it', () => {
+    const app = newApp();
+    app.gateway.failOnCall(1);
+    const booking = aBookingWithRefund(app);
+    const cancellation = app.service.cancel(booking.id);
+    const refund = app.bus.messagesOfType(REFUND_REQUESTED)[0];
+
+    expect(cancellation.booking.status).toBe('cancelled');
+    expect(app.ledger.size()).toBe(0);
+    expect(app.gateway.settled()).toHaveLength(0);
+    expect(app.gateway.callCount()).toBe(1);
+    expect(app.bus.deadLetters()).toMatchObject([
+      { message: { id: refund.id }, subscriberName: 'RefundLedger', attempt: 1 },
+    ]);
+
+    app.bus.redeliver(refund.id);
+    app.bus.redeliver(refund.id);
+
+    expect(app.ledger.forBooking(booking.id)).toHaveLength(1);
+    expect(app.ledger.totalRefundedCents()).toBe(cancellation.refundCents);
+    expect(app.gateway.settledFor(booking.id)).toHaveLength(1);
+    expect(app.gateway.totalSettledCents()).toBe(cancellation.refundCents);
+    expect(app.gateway.callCount()).toBe(2);
+    expect(app.bus.deliveryCount(refund.id)).toBe(3);
+    expect(app.bus.deadLetters()).toHaveLength(1);
   });
 
   it('books nothing when the cancellation owes nothing', () => {

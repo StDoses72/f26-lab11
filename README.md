@@ -67,3 +67,5 @@ paste into `EVENTS.md`. Both print the same output on every run.
 
 See the Lab 11 handout on the course page for the three milestones you show a
 TA.
+
+Tool/model used: OpenAI Codex (GPT-6) for code walkthroughs, implementation, tests, and documentation.

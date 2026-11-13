@@ -15,15 +15,16 @@ export interface LedgerEntry {
 /**
  * Books refunds and sends the money back.
  *
- * For a refund message the handler writes a ledger entry, then calls the
- * payment provider for the same amount. The ledger is append only: entries are
- * numbered in the order they were written, and nothing edits or removes one
- * after the fact.
+ * For a refund message the handler calls the payment provider, then records
+ * the settled refund. Completed message IDs prevent duplicate processing in
+ * this instance. The ledger is append only: entries are numbered in the order
+ * they were written, and nothing edits or removes one after the fact.
  */
 export class RefundLedger implements Subscriber<RefundRequested> {
   readonly name = 'RefundLedger';
 
   private readonly entries: LedgerEntry[] = [];
+  private readonly completedMessageIds = new Set<string>();
   private readonly gateway: PaymentGateway;
 
   constructor(gateway: PaymentGateway) {
@@ -31,7 +32,12 @@ export class RefundLedger implements Subscriber<RefundRequested> {
   }
 
   handle(message: Message<RefundRequested>): void {
+    if (this.completedMessageIds.has(message.id)) {
+      return;
+    }
+
     const event = message.payload;
+    this.gateway.refund(event.bookingId, event.amountCents);
     this.entries.push({
       entryId: `led-${this.entries.length + 1}`,
       bookingId: event.bookingId,
@@ -40,7 +46,7 @@ export class RefundLedger implements Subscriber<RefundRequested> {
       reason: event.reason,
       recordedAtMinute: message.publishedAtMinute,
     });
-    this.gateway.refund(event.bookingId, event.amountCents);
+    this.completedMessageIds.add(message.id);
   }
 
   /** Every ledger entry, oldest first. */
